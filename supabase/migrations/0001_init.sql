@@ -33,11 +33,13 @@ insert into storage.buckets (id, name, public)
   on conflict (id) do nothing;
 
 -- Storage 정책: 누구나 읽기 가능
+drop policy if exists "card-images public read" on storage.objects;
 create policy "card-images public read"
   on storage.objects for select
   using (bucket_id = 'card-images');
 
 -- Storage 정책: service role만 삽입/수정
+drop policy if exists "card-images service write" on storage.objects;
 create policy "card-images service write"
   on storage.objects for insert
   with check (bucket_id = 'card-images');

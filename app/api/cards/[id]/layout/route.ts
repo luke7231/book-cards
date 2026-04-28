@@ -11,7 +11,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
     if (layout_json === null || layout_json === undefined) {
       const supabase = createAdminClient()
       const { data, error } = await supabase.from('cards').update({ layout_json: null }).eq('id', id).select().single()
-      if (error) throw error
+      if (error) {
+        if (error.code === 'PGRST204' && String(error.message).includes('layout_json')) {
+          return NextResponse.json(
+            {
+              error:
+                'DB에 cards.layout_json 컬럼이 없습니다. Supabase SQL Editor에서 supabase/migrations/0002_card_layout_json.sql 내용을 실행한 뒤 다시 시도하세요.',
+            },
+            { status: 503 }
+          )
+        }
+        throw error
+      }
       return NextResponse.json({ card: data })
     }
 
@@ -34,7 +45,18 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       .select()
       .single()
 
-    if (error) throw error
+    if (error) {
+      if (error.code === 'PGRST204' && String(error.message).includes('layout_json')) {
+        return NextResponse.json(
+          {
+            error:
+              'DB에 cards.layout_json 컬럼이 없습니다. Supabase SQL Editor에서 supabase/migrations/0002_card_layout_json.sql 내용을 실행한 뒤 다시 시도하세요.',
+          },
+          { status: 503 }
+        )
+      }
+      throw error
+    }
     if (!data) {
       return NextResponse.json({ error: '카드를 찾을 수 없습니다.' }, { status: 404 })
     }

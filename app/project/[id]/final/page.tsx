@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, type MouseEvent } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import JSZip from 'jszip'
@@ -8,14 +8,18 @@ import { saveAs } from 'file-saver'
 import { createClient } from '@/lib/supabase/client'
 import { composeAllCards } from '@/lib/canvas/composer'
 import {
-  applyGlobalContentLayout,
+  mergeCardWithGlobalLayout,
+  mergeGlobalLayoutForPersist,
+  parseCardLayout,
   isContentLayoutCard,
   layoutFromCardsOrDefault,
+  defaultCardLayoutForEditor,
 } from '@/lib/canvas/card-layout'
 import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent } from '@/components/ui/dialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import type { Project, Card, CardLayout, CardLayoutContent } from '@/lib/types'
 import {
   Download,
@@ -25,6 +29,7 @@ import {
   ImageIcon,
   BookOpen,
   LayoutTemplate,
+  Pencil,
 } from 'lucide-react'
 
 export default function FinalPage() {
@@ -45,6 +50,40 @@ export default function FinalPage() {
   const [layoutDraft, setLayoutDraft] = useState<CardLayout | null>(null)
   const [debouncedLayout, setDebouncedLayout] = useState<CardLayout | null>(null)
   const [layoutSaving, setLayoutSaving] = useState(false)
+  const [editCard, setEditCard] = useState<Card | null>(null)
+  const [editTitle, setEditTitle] = useState('')
+  const [editBody, setEditBody] = useState('')
+  const [useFixedPanel, setUseFixedPanel] = useState(false)
+  const [panelX, setPanelX] = useState(44)
+  const [panelY, setPanelY] = useState(500)
+  const [panelW, setPanelW] = useState(992)
+  const [panelH, setPanelH] = useState(420)
+  const [cardEditSaving, setCardEditSaving] = useState(false)
+
+  useEffect(() => {
+    if (!editCard) return
+    setEditTitle(editCard.title)
+    setEditBody(editCard.body)
+    const tp = parseCardLayout(editCard.layout_json)?.content?.textPanel
+    if (
+      tp &&
+      [tp.x, tp.y, tp.width, tp.height].every(n => typeof n === 'number' && Number.isFinite(n)) &&
+      tp.width > 0 &&
+      tp.height > 0
+    ) {
+      setUseFixedPanel(true)
+      setPanelX(tp.x)
+      setPanelY(tp.y)
+      setPanelW(tp.width)
+      setPanelH(tp.height)
+    } else {
+      setUseFixedPanel(false)
+      setPanelX(44)
+      setPanelY(500)
+      setPanelW(992)
+      setPanelH(420)
+    }
+  }, [editCard])
 
   useEffect(() => {
     setLayoutDraft(null)
@@ -89,13 +128,16 @@ export default function FinalPage() {
 
   const cardsForCompose = useMemo(() => {
     if (!debouncedLayout) return cards
-    return applyGlobalContentLayout(cards, debouncedLayout)
+    return cards.map(c => mergeCardWithGlobalLayout(debouncedLayout, c))
   }, [cards, debouncedLayout])
 
   const composeKey = useMemo(
     () =>
       cardsForCompose
-        .map(c => `${c.id}:${c.image_url ?? ''}:${JSON.stringify(c.layout_json ?? null)}`)
+        .map(
+          c =>
+            `${c.id}:${c.image_url ?? ''}:${JSON.stringify(c.layout_json ?? null)}:${encodeURIComponent(c.title)}:${encodeURIComponent(c.body)}`
+        )
         .join('|'),
     [cardsForCompose]
   )
@@ -140,21 +182,80 @@ export default function FinalPage() {
     try {
       await Promise.all(
         contentCards.map(async c => {
+          const merged = mergeGlobalLayoutForPersist(layoutDraft, parseCardLayout(c.layout_json))
           const res = await fetch(`/api/cards/${c.id}/layout`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ layout_json: layoutDraft }),
+            body: JSON.stringify({ layout_json: merged }),
           })
           const data = await res.json()
           if (!res.ok) throw new Error(data.error || '저장 실패')
         })
       )
-      setCards(prev => applyGlobalContentLayout(prev, layoutDraft))
+      setCards(prev =>
+        prev.map(c =>
+          isContentLayoutCard(c.card_number)
+            ? {
+                ...c,
+                layout_json: mergeGlobalLayoutForPersist(layoutDraft, parseCardLayout(c.layout_json)),
+              }
+            : c
+        )
+      )
       toast.success('레이아웃이 저장되었습니다.')
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '저장 실패')
     } finally {
       setLayoutSaving(false)
+    }
+  }
+
+  async function handleSaveCardEdit() {
+    if (!editCard) return
+    setCardEditSaving(true)
+    try {
+      const global = layoutDraft ?? defaultCardLayoutForEditor()
+      const payload: { title: string; body: string; layout_json?: CardLayout } = {
+        title: editTitle,
+        body: editBody,
+      }
+
+      if (isContentLayoutCard(editCard.card_number)) {
+        const base = mergeGlobalLayoutForPersist(global, parseCardLayout(editCard.layout_json))
+        if (useFixedPanel) {
+          payload.layout_json = {
+            ...base,
+            content: {
+              ...base.content!,
+              textPanel: {
+                x: panelX,
+                y: panelY,
+                width: panelW,
+                height: panelH,
+              },
+            },
+          }
+        } else {
+          const { textPanel: _removed, ...rest } = base.content!
+          payload.layout_json = { version: 1, content: rest }
+        }
+      }
+
+      const res = await fetch(`/api/cards/${editCard.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || '저장 실패')
+
+      setCards(prev => prev.map(c => (c.id === editCard.id ? (data.card as Card) : c)))
+      toast.success('카드가 저장되었습니다.')
+      setEditCard(null)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '저장 실패')
+    } finally {
+      setCardEditSaving(false)
     }
   }
 
@@ -339,7 +440,7 @@ export default function FinalPage() {
               </Button>
             </div>
             <p className="text-stone-500 text-sm">
-              패널을 카드 가장자리에서 띄울 여백과 테두리입니다. 수정 후 약 0.3초 뒤 미리보기가 갱신됩니다.
+              패널을 카드 가장자리에서 띄울 여백과 테두리입니다. 이 값은 모든 본문 카드에 공통 적용되며, 카드별 위치·크기는 각 카드「편집」에서 지정합니다.
             </p>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
               <div className="space-y-2">
@@ -431,7 +532,7 @@ export default function FinalPage() {
               </div>
             </div>
             <p className="text-stone-600 text-xs">
-              고급: JSON으로 좌표를 덮어쓰려면 DB의 layout_json.textPanel을 설정하면 됩니다.
+              텍스트·패널 좌표는 카드 썸네일에서「편집」을 눌러 카드마다 저장할 수 있습니다.
             </p>
           </div>
         )}
@@ -447,6 +548,10 @@ export default function FinalPage() {
               regenerating={regeneratingImage === card.id}
               onClick={() => handleCardClick(card)}
               onRegenerate={() => handleRegenerateImage(card)}
+              onEdit={e => {
+                e.stopPropagation()
+                setEditCard(card)
+              }}
             />
           ))}
         </div>
@@ -532,6 +637,123 @@ export default function FinalPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={!!editCard}
+        onOpenChange={open => {
+          if (!open) setEditCard(null)
+        }}
+      >
+        <DialogContent className="max-w-lg max-h-[min(90vh,800px)] overflow-y-auto bg-stone-900 border-stone-700 text-white">
+          {editCard && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="text-stone-100">
+                  카드 {editCard.card_number + 1} 편집
+                </DialogTitle>
+              </DialogHeader>
+              <div className="space-y-4 pt-2">
+                <div className="space-y-2">
+                  <Label className="text-stone-400 text-xs">제목</Label>
+                  <Input
+                    value={editTitle}
+                    onChange={e => setEditTitle(e.target.value)}
+                    className="bg-stone-800 border-stone-600 text-white"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label className="text-stone-400 text-xs">본문</Label>
+                  <Textarea
+                    value={editBody}
+                    onChange={e => setEditBody(e.target.value)}
+                    className="bg-stone-800 border-stone-600 text-white min-h-28"
+                  />
+                </div>
+
+                {isContentLayoutCard(editCard.card_number) && (
+                  <div className="space-y-3 border border-stone-700 rounded-lg p-4">
+                    <label className="flex items-center gap-2 text-sm text-stone-300 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={useFixedPanel}
+                        onChange={e => setUseFixedPanel(e.target.checked)}
+                        className="rounded border-stone-500"
+                      />
+                      고정 텍스트 패널 (좌표·크기 직접 지정)
+                    </label>
+                    {useFixedPanel && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <Label className="text-stone-500 text-xs">X (px)</Label>
+                          <Input
+                            type="number"
+                            value={panelX}
+                            onChange={e => setPanelX(Number(e.target.value))}
+                            className="bg-stone-800 border-stone-600 text-white"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-stone-500 text-xs">Y (px)</Label>
+                          <Input
+                            type="number"
+                            value={panelY}
+                            onChange={e => setPanelY(Number(e.target.value))}
+                            className="bg-stone-800 border-stone-600 text-white"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-stone-500 text-xs">너비 (px)</Label>
+                          <Input
+                            type="number"
+                            min={120}
+                            value={panelW}
+                            onChange={e => setPanelW(Number(e.target.value))}
+                            className="bg-stone-800 border-stone-600 text-white"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-stone-500 text-xs">높이 (px)</Label>
+                          <Input
+                            type="number"
+                            min={80}
+                            value={panelH}
+                            onChange={e => setPanelH(Number(e.target.value))}
+                            className="bg-stone-800 border-stone-600 text-white"
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {!useFixedPanel && (
+                      <p className="text-stone-500 text-xs">
+                        해제 시 전역「좌우·상하 여백」규칙으로 패널이 자동 배치됩니다.
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="border-stone-600 text-stone-300"
+                    onClick={() => setEditCard(null)}
+                  >
+                    취소
+                  </Button>
+                  <Button
+                    type="button"
+                    className="bg-amber-500 hover:bg-amber-400 text-stone-900"
+                    disabled={cardEditSaving}
+                    onClick={handleSaveCardEdit}
+                  >
+                    {cardEditSaving ? '저장 중…' : '저장'}
+                  </Button>
+                </div>
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -543,9 +765,18 @@ interface CardGridItemProps {
   regenerating: boolean
   onClick: () => void
   onRegenerate: () => void
+  onEdit: (e: MouseEvent) => void
 }
 
-function CardGridItem({ card, blob, composing, regenerating, onClick, onRegenerate }: CardGridItemProps) {
+function CardGridItem({
+  card,
+  blob,
+  composing,
+  regenerating,
+  onClick,
+  onRegenerate,
+  onEdit,
+}: CardGridItemProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null)
 
   useEffect(() => {
@@ -568,7 +799,7 @@ function CardGridItem({ card, blob, composing, regenerating, onClick, onRegenera
             onClick={onClick}
           />
           {/* 호버 오버레이 */}
-          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100">
+          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 transition-colors flex flex-wrap items-center justify-center gap-2 opacity-0 group-hover:opacity-100 p-2">
             <Button
               onClick={onClick}
               size="sm"
@@ -578,7 +809,22 @@ function CardGridItem({ card, blob, composing, regenerating, onClick, onRegenera
               미리보기
             </Button>
             <Button
-              onClick={e => { e.stopPropagation(); onRegenerate() }}
+              onClick={e => {
+                e.stopPropagation()
+                onEdit(e)
+              }}
+              size="sm"
+              variant="outline"
+              className="border-white/50 text-white hover:bg-white/20 text-xs gap-1"
+            >
+              <Pencil className="w-3 h-3" />
+              편집
+            </Button>
+            <Button
+              onClick={e => {
+                e.stopPropagation()
+                onRegenerate()
+              }}
               disabled={regenerating}
               size="sm"
               variant="outline"
@@ -602,6 +848,18 @@ function CardGridItem({ card, blob, composing, regenerating, onClick, onRegenera
           <span className="text-xs">{card.card_number + 1}장</span>
         </div>
       )}
+
+      {/* 편집 (항상 노출) */}
+      <Button
+        type="button"
+        size="sm"
+        variant="secondary"
+        className="absolute top-2 right-2 h-7 w-7 p-0 bg-black/55 border-0 text-white hover:bg-black/70 z-10"
+        onClick={onEdit}
+        title="카드 편집"
+      >
+        <Pencil className="w-3.5 h-3.5" />
+      </Button>
 
       {/* 카드 번호 뱃지 */}
       <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm rounded-md px-2 py-0.5">

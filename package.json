@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "compare-flux": "node --env-file=.env.local scripts/compare-flux-images.mjs"
+    "compare-flux": "node --env-file=.env.local scripts/compare-flux-images.mjs",
+    "db:link": "supabase link",
+    "db:push": "supabase db push",
+    "db:push:dry": "supabase db push --dry-run"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^3.0.104",
@@ -35,6 +38,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
+    "supabase": "^2.95.5",
     "typescript": "^5"
   }
 }
