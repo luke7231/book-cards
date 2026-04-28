@@ -6,6 +6,7 @@ export const cardSchema = z.object({
   body: z.string().describe('카드 본문 - 2~3문장, 구어체, 반말'),
   image_prompt: z
     .string()
+    .min(1, '비어 있으면 안 됨 — 영어로 한 컷 장면을 반드시 채울 것')
     .describe(
       'English only. One concrete figurative scene for 19th-c book-style engraving: visible figure(s) or silhouette, clear action, props, setting (sea, cliff, table, fire, etc.). Must visually echo this card’s theme. NOT abstract mood-only. NO proper names or place names from the book; use generic nouns only.'
     ),

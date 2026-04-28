@@ -24,6 +24,28 @@ const CONFIDENCE_COLORS: Record<string, string> = {
   하: 'bg-red-500/20 text-red-300 border-red-500/30',
 }
 
+function cardDraftFromServer(card: Card) {
+  return {
+    title: card.title,
+    body: card.body,
+    image_prompt: card.image_prompt ?? '',
+  }
+}
+
+/** 로컬 초안이 일부 필드만 있어도 서버 카드로 채워 표시·저장이 깨지지 않게 함 */
+function mergeCardDraft(
+  card: Card,
+  draft: Partial<{ title: string; body: string; image_prompt: string }> | undefined,
+): { title: string; body: string; image_prompt: string } {
+  const b = cardDraftFromServer(card)
+  if (!draft) return b
+  return {
+    title: draft.title !== undefined ? draft.title : b.title,
+    body: draft.body !== undefined ? draft.body : b.body,
+    image_prompt: draft.image_prompt !== undefined ? draft.image_prompt : b.image_prompt,
+  }
+}
+
 export default function TextReviewPage() {
   const { id: projectId } = useParams<{ id: string }>()
   const router = useRouter()
@@ -36,7 +58,10 @@ export default function TextReviewPage() {
   const [regeneratingCard, setRegeneratingCard] = useState<string | null>(null)
 
   // 편집 로컬 상태
-  const [localCards, setLocalCards] = useState<Record<string, { title: string; body: string }>>({})
+  const [localCards, setLocalCards] = useState<
+    Record<string, { title: string; body: string; image_prompt: string }>
+  >({})
+  const [hookText, setHookText] = useState('')
   const [caption, setCaption] = useState('')
   const [hashtags, setHashtags] = useState('')
 
@@ -57,12 +82,17 @@ export default function TextReviewPage() {
 
       setProject(proj)
       setCards(cardData || [])
+      setHookText(proj.hook_text || '')
       setCaption(proj.caption || '')
       setHashtags(proj.hashtags || '')
 
-      const localInit: Record<string, { title: string; body: string }> = {}
+      const localInit: Record<string, { title: string; body: string; image_prompt: string }> = {}
       for (const c of cardData || []) {
-        localInit[c.id] = { title: c.title, body: c.body }
+        localInit[c.id] = {
+          title: c.title,
+          body: c.body,
+          image_prompt: c.image_prompt ?? '',
+        }
       }
       setLocalCards(localInit)
       setLoading(false)
@@ -71,7 +101,7 @@ export default function TextReviewPage() {
   }, [projectId])
 
   const debounceSave = useCallback(
-    (cardId: string, field: 'title' | 'body', value: string) => {
+    (cardId: string, field: 'title' | 'body' | 'image_prompt', value: string) => {
       if (saveTimers.current[cardId]) clearTimeout(saveTimers.current[cardId])
       saveTimers.current[cardId] = setTimeout(async () => {
         await supabase.from('cards').update({ [field]: value }).eq('id', cardId)
@@ -80,9 +110,12 @@ export default function TextReviewPage() {
     []
   )
 
-  function handleCardChange(cardId: string, field: 'title' | 'body', value: string) {
-    setLocalCards(prev => ({ ...prev, [cardId]: { ...prev[cardId], [field]: value } }))
-    debounceSave(cardId, field, value)
+  function handleCardChange(card: Card, field: 'title' | 'body' | 'image_prompt', value: string) {
+    setLocalCards(prev => {
+      const merged = mergeCardDraft(card, prev[card.id])
+      return { ...prev, [card.id]: { ...merged, [field]: value } }
+    })
+    debounceSave(card.id, field, value)
   }
 
   async function handleRegenerateCard(card: Card) {
@@ -103,7 +136,11 @@ export default function TextReviewPage() {
       setCards(prev => prev.map(c => (c.id === card.id ? data.card : c)))
       setLocalCards(prev => ({
         ...prev,
-        [card.id]: { title: data.card.title, body: data.card.body },
+        [card.id]: {
+          title: data.card.title,
+          body: data.card.body,
+          image_prompt: data.card.image_prompt ?? '',
+        },
       }))
       toast.success(`카드 ${card.card_number + 1} 재생성 완료`)
     } catch (err) {
@@ -113,10 +150,10 @@ export default function TextReviewPage() {
     }
   }
 
-  async function saveCaptionAndHashtags() {
+  async function saveProjectMeta() {
     await supabase
       .from('projects')
-      .update({ caption, hashtags })
+      .update({ hook_text: hookText, caption, hashtags })
       .eq('id', projectId)
   }
 
@@ -133,12 +170,12 @@ export default function TextReviewPage() {
         cards.map(card =>
           supabase
             .from('cards')
-            .update(localCards[card.id] || {})
-            .eq('id', card.id)
-        )
+            .update(mergeCardDraft(card, localCards[card.id]))
+            .eq('id', card.id),
+        ),
       )
 
-      await saveCaptionAndHashtags()
+      await saveProjectMeta()
 
       await supabase
         .from('projects')
@@ -232,27 +269,33 @@ export default function TextReviewPage() {
         )}
 
         {/* 훅 (커버) */}
-        {project?.hook_text && (
-          <div className="bg-stone-900 border border-stone-700 rounded-2xl p-6">
-            <div className="flex items-center gap-2 mb-3">
-              <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/30 text-xs">
-                COVER
-              </Badge>
-              <span className="text-stone-400 text-sm">커버 훅 문구</span>
-            </div>
-            <p className="text-xl font-bold text-white">{project.hook_text}</p>
+        <div className="bg-stone-900 border border-stone-700 rounded-2xl p-6">
+          <div className="flex items-center gap-2 mb-3">
+            <Badge className="bg-amber-500/20 text-amber-300 border-amber-500/30 text-xs">
+              COVER
+            </Badge>
+            <span className="text-stone-400 text-sm">커버 훅 문구</span>
           </div>
-        )}
+          <Textarea
+            value={hookText}
+            onChange={e => setHookText(e.target.value)}
+            onBlur={saveProjectMeta}
+            rows={3}
+            className="bg-stone-800 border-stone-600 text-white text-xl font-bold resize-none focus:border-amber-400 leading-snug"
+            placeholder="커버에 쓸 훅 문구"
+          />
+        </div>
 
         {/* 카드 리스트 */}
         {cards.map(card => (
           <CardEditorItem
             key={card.id}
             card={card}
-            local={localCards[card.id] || { title: card.title, body: card.body }}
+            local={mergeCardDraft(card, localCards[card.id])}
             regenerating={regeneratingCard === card.id}
-            onTitleChange={v => handleCardChange(card.id, 'title', v)}
-            onBodyChange={v => handleCardChange(card.id, 'body', v)}
+            onTitleChange={v => handleCardChange(card, 'title', v)}
+            onBodyChange={v => handleCardChange(card, 'body', v)}
+            onImagePromptChange={v => handleCardChange(card, 'image_prompt', v)}
             onRegenerate={() => handleRegenerateCard(card)}
           />
         ))}
@@ -265,7 +308,7 @@ export default function TextReviewPage() {
             <Textarea
               value={caption}
               onChange={e => setCaption(e.target.value)}
-              onBlur={saveCaptionAndHashtags}
+              onBlur={saveProjectMeta}
               rows={5}
               className="bg-stone-800 border-stone-600 text-stone-200 resize-none focus:border-amber-400"
             />
@@ -275,7 +318,7 @@ export default function TextReviewPage() {
             <Textarea
               value={hashtags}
               onChange={e => setHashtags(e.target.value)}
-              onBlur={saveCaptionAndHashtags}
+              onBlur={saveProjectMeta}
               rows={4}
               className="bg-stone-800 border-stone-600 text-stone-200 resize-none focus:border-amber-400 font-mono text-sm"
             />
@@ -297,10 +340,11 @@ export default function TextReviewPage() {
 
 interface CardEditorItemProps {
   card: Card
-  local: { title: string; body: string }
+  local: { title: string; body: string; image_prompt: string }
   regenerating: boolean
   onTitleChange: (v: string) => void
   onBodyChange: (v: string) => void
+  onImagePromptChange: (v: string) => void
   onRegenerate: () => void
 }
 
@@ -310,12 +354,13 @@ function CardEditorItem({
   regenerating,
   onTitleChange,
   onBodyChange,
+  onImagePromptChange,
   onRegenerate,
 }: CardEditorItemProps) {
   const [copied, setCopied] = useState(false)
 
   async function handleCopy() {
-    const text = `${local.title}\n\n${local.body}`
+    const text = `${local.title}\n\n${local.body}\n\n---\n\n${local.image_prompt}`
     await navigator.clipboard.writeText(text)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -383,6 +428,17 @@ function CardEditorItem({
         className="bg-stone-800 border-stone-600 text-stone-300 resize-none focus:border-amber-400 text-sm leading-relaxed"
         placeholder="카드 본문"
       />
+
+      <div className="space-y-2 pt-1 border-t border-stone-800">
+        <label className="text-stone-500 text-xs font-medium">이미지 프롬프트 (영어 · Replicate용)</label>
+        <Textarea
+          value={local.image_prompt}
+          onChange={e => onImagePromptChange(e.target.value)}
+          rows={3}
+          className="bg-stone-800/80 border-stone-700 text-stone-400 resize-none focus:border-amber-500/50 text-sm leading-relaxed font-mono"
+          placeholder="장면 묘사 (영어)"
+        />
+      </div>
     </div>
   )
 }

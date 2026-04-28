@@ -4,7 +4,7 @@ import { Output } from 'ai'
 import { insightSchema, cardSchema, type InsightOutput, type CardOutput } from './schema'
 import { SYSTEM_PROMPT, buildUserPrompt, buildRegeneratePrompt } from './prompts'
 
-const MODEL = 'anthropic/claude-sonnet-4.6'
+const MODEL = 'anthropic/claude-opus-4.6'
 
 export async function generateInsights(bookTitle: string): Promise<InsightOutput> {
   const { experimental_output } = await generateText({
