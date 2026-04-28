@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { generateImage } from '@/lib/replicate'
-import { STYLE_PREFIXES } from '@/lib/ai/prompts'
+import { STYLE_PREFIXES, buildBookImageContextPrefix } from '@/lib/ai/prompts'
 
-export const maxDuration = 60
+export const maxDuration = 120
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
 
     const { data: project } = await supabase
       .from('projects')
-      .select('style')
+      .select('style, book_title')
       .eq('id', projectId)
       .single()
 
@@ -32,7 +32,8 @@ export async function POST(req: NextRequest) {
     }
 
     const stylePrefix = STYLE_PREFIXES[project.style] || STYLE_PREFIXES.engraving
-    const fullPrompt = stylePrefix + card.image_prompt
+    const bookPrefix = buildBookImageContextPrefix(project.book_title ?? '')
+    const fullPrompt = stylePrefix + bookPrefix + card.image_prompt
 
     const imageUrl = await generateImage(fullPrompt)
 

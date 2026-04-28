@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/lib/supabase/admin'
 import { generateImagesParallel } from '@/lib/replicate'
-import { STYLE_PREFIXES } from '@/lib/ai/prompts'
+import { STYLE_PREFIXES, buildBookImageContextPrefix } from '@/lib/ai/prompts'
 
-export const maxDuration = 300
+export const maxDuration = 600
 
 export async function POST(req: NextRequest) {
   try {
@@ -13,7 +13,7 @@ export async function POST(req: NextRequest) {
 
     const { data: project } = await supabase
       .from('projects')
-      .select('style')
+      .select('style, book_title')
       .eq('id', projectId)
       .single()
 
@@ -32,7 +32,8 @@ export async function POST(req: NextRequest) {
     }
 
     const stylePrefix = STYLE_PREFIXES[project.style] || STYLE_PREFIXES.engraving
-    const prompts = cards.map(c => stylePrefix + c.image_prompt)
+    const bookPrefix = buildBookImageContextPrefix(project.book_title ?? '')
+    const prompts = cards.map(c => stylePrefix + bookPrefix + c.image_prompt)
 
     const results = await generateImagesParallel(prompts)
 
