@@ -1,15 +1,22 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import JSZip from 'jszip'
 import { saveAs } from 'file-saver'
 import { createClient } from '@/lib/supabase/client'
-import { composeAllCards, composeCard } from '@/lib/canvas/composer'
+import { composeAllCards } from '@/lib/canvas/composer'
+import {
+  applyGlobalContentLayout,
+  isContentLayoutCard,
+  layoutFromCardsOrDefault,
+} from '@/lib/canvas/card-layout'
 import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent } from '@/components/ui/dialog'
-import type { Project, Card } from '@/lib/types'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import type { Project, Card, CardLayout, CardLayoutContent } from '@/lib/types'
 import {
   Download,
   Copy,
@@ -17,6 +24,7 @@ import {
   CheckCircle2,
   ImageIcon,
   BookOpen,
+  LayoutTemplate,
 } from 'lucide-react'
 
 export default function FinalPage() {
@@ -34,8 +42,18 @@ export default function FinalPage() {
   const [previewCard, setPreviewCard] = useState<Card | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [downloading, setDownloading] = useState(false)
+  const [layoutDraft, setLayoutDraft] = useState<CardLayout | null>(null)
+  const [debouncedLayout, setDebouncedLayout] = useState<CardLayout | null>(null)
+  const [layoutSaving, setLayoutSaving] = useState(false)
 
   useEffect(() => {
+    setLayoutDraft(null)
+    setDebouncedLayout(null)
+  }, [projectId])
+
+  useEffect(() => {
+    setLoading(true)
+    setComposedBlobs(new Map())
     async function load() {
       const [{ data: proj }, { data: cardData }] = await Promise.all([
         supabase.from('projects').select('*').eq('id', projectId).single(),
@@ -55,27 +73,90 @@ export default function FinalPage() {
     load()
   }, [projectId])
 
-  // 카드 로드 후 자동 합성
   useEffect(() => {
-    if (cards.length > 0 && project && !composing && composedBlobs.size === 0) {
-      runCompose(cards, project)
-    }
-  }, [cards, project])
+    if (loading || cards.length === 0) return
+    setLayoutDraft(prev => prev ?? layoutFromCardsOrDefault(cards))
+  }, [loading, cards, projectId])
 
-  const runCompose = useCallback(async (cardList: Card[], proj: Project) => {
+  useEffect(() => {
+    if (!layoutDraft) {
+      setDebouncedLayout(null)
+      return
+    }
+    const id = window.setTimeout(() => setDebouncedLayout(layoutDraft), 320)
+    return () => window.clearTimeout(id)
+  }, [layoutDraft])
+
+  const cardsForCompose = useMemo(() => {
+    if (!debouncedLayout) return cards
+    return applyGlobalContentLayout(cards, debouncedLayout)
+  }, [cards, debouncedLayout])
+
+  const composeKey = useMemo(
+    () =>
+      cardsForCompose
+        .map(c => `${c.id}:${c.image_url ?? ''}:${JSON.stringify(c.layout_json ?? null)}`)
+        .join('|'),
+    [cardsForCompose]
+  )
+
+  useEffect(() => {
+    if (loading || !project || cardsForCompose.length === 0) return
+    let cancelled = false
     setComposing(true)
     setComposeProgress(0)
-    try {
-      const blobs = await composeAllCards(cardList, proj, (done, total) => {
-        setComposeProgress(Math.round((done / total) * 100))
+    composeAllCards(cardsForCompose, project, (done, total) => {
+      if (!cancelled) setComposeProgress(Math.round((done / total) * 100))
+    })
+      .then(blobs => {
+        if (!cancelled) setComposedBlobs(blobs)
       })
-      setComposedBlobs(blobs)
-    } catch (err) {
-      toast.error('합성 중 오류: ' + (err instanceof Error ? err.message : String(err)))
-    } finally {
-      setComposing(false)
+      .catch(err => {
+        if (!cancelled)
+          toast.error('합성 중 오류: ' + (err instanceof Error ? err.message : String(err)))
+      })
+      .finally(() => {
+        if (!cancelled) setComposing(false)
+      })
+
+    return () => {
+      cancelled = true
     }
-  }, [])
+  }, [composeKey, project, loading])
+
+  function patchLayoutContent(patch: Partial<CardLayoutContent>) {
+    setLayoutDraft(prev => {
+      if (!prev) return prev
+      const base = prev.content ?? {}
+      return { ...prev, content: { ...base, ...patch } }
+    })
+  }
+
+  async function handleSaveLayout() {
+    if (!layoutDraft) return
+    const contentCards = cards.filter(c => isContentLayoutCard(c.card_number))
+    if (contentCards.length === 0) return
+    setLayoutSaving(true)
+    try {
+      await Promise.all(
+        contentCards.map(async c => {
+          const res = await fetch(`/api/cards/${c.id}/layout`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ layout_json: layoutDraft }),
+          })
+          const data = await res.json()
+          if (!res.ok) throw new Error(data.error || '저장 실패')
+        })
+      )
+      setCards(prev => applyGlobalContentLayout(prev, layoutDraft))
+      toast.success('레이아웃이 저장되었습니다.')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '저장 실패')
+    } finally {
+      setLayoutSaving(false)
+    }
+  }
 
   async function handleRegenerateImage(card: Card) {
     setRegeneratingImage(card.id)
@@ -91,14 +172,6 @@ export default function FinalPage() {
       const updatedCard: Card = { ...card, image_url: data.card.image_url }
       setCards(prev => prev.map(c => (c.id === card.id ? updatedCard : c)))
 
-      // 해당 카드만 재합성
-      const blob = await composeCard({
-        card: updatedCard,
-        project: project!,
-        isCover: updatedCard.card_number === 0,
-        isEnding: updatedCard.card_number === 13,
-      })
-      setComposedBlobs(prev => new Map(prev).set(card.id, blob))
       toast.success('이미지 재생성 완료')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : '이미지 재생성 실패')
@@ -246,6 +319,120 @@ export default function FinalPage() {
                 style={{ width: `${composeProgress}%` }}
               />
             </div>
+          </div>
+        )}
+
+        {layoutDraft && (
+          <div className="mb-8 bg-stone-900 border border-stone-700 rounded-2xl p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-stone-200 font-semibold">
+                <LayoutTemplate className="w-5 h-5 text-amber-400" />
+                본문 카드 레이아웃 (1–12장)
+              </div>
+              <Button
+                type="button"
+                onClick={handleSaveLayout}
+                disabled={layoutSaving}
+                className="bg-stone-700 hover:bg-stone-600 text-white"
+              >
+                {layoutSaving ? '저장 중…' : '레이아웃 저장'}
+              </Button>
+            </div>
+            <p className="text-stone-500 text-sm">
+              패널을 카드 가장자리에서 띄울 여백과 테두리입니다. 수정 후 약 0.3초 뒤 미리보기가 갱신됩니다.
+            </p>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="space-y-2">
+                <Label className="text-stone-400 text-xs">좌우 여백 (px)</Label>
+                <Input
+                  type="number"
+                  min={16}
+                  max={200}
+                  value={layoutDraft.content?.panelOutsetX ?? 44}
+                  onChange={e => patchLayoutContent({ panelOutsetX: Number(e.target.value) })}
+                  className="bg-stone-800 border-stone-600 text-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-stone-400 text-xs">상·하단 여백 (px)</Label>
+                <Input
+                  type="number"
+                  min={16}
+                  max={200}
+                  value={layoutDraft.content?.panelOutsetY ?? 40}
+                  onChange={e => patchLayoutContent({ panelOutsetY: Number(e.target.value) })}
+                  className="bg-stone-800 border-stone-600 text-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-stone-400 text-xs">테두리 두께 (0=없음)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={8}
+                  value={
+                    layoutDraft.content?.border === null
+                      ? 0
+                      : (layoutDraft.content?.border?.width ?? 2)
+                  }
+                  onChange={e => {
+                    const w = Number(e.target.value)
+                    if (!w) {
+                      patchLayoutContent({ border: null })
+                      return
+                    }
+                    const color =
+                      layoutDraft.content?.border &&
+                      layoutDraft.content.border.width > 0
+                        ? layoutDraft.content.border.color
+                        : '#111111'
+                    patchLayoutContent({ border: { width: w, color } })
+                  }}
+                  className="bg-stone-800 border-stone-600 text-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-stone-400 text-xs">테두리 색</Label>
+                <Input
+                  type="text"
+                  value={
+                    layoutDraft.content?.border &&
+                    layoutDraft.content.border !== null &&
+                    layoutDraft.content.border.width > 0
+                      ? layoutDraft.content.border.color
+                      : '#111111'
+                  }
+                  onChange={e =>
+                    patchLayoutContent({
+                      border: {
+                        width:
+                          layoutDraft.content?.border &&
+                          layoutDraft.content.border !== null &&
+                          layoutDraft.content.border.width > 0
+                            ? layoutDraft.content.border.width
+                            : 2,
+                        color: e.target.value,
+                      },
+                    })
+                  }
+                  className="bg-stone-800 border-stone-600 text-white font-mono text-sm"
+                />
+              </div>
+              <div className="space-y-2 col-span-2 sm:col-span-1">
+                <Label className="text-stone-400 text-xs">워터마크 (하단에서 px)</Label>
+                <Input
+                  type="number"
+                  min={8}
+                  max={120}
+                  value={layoutDraft.content?.watermarkBottom ?? 24}
+                  onChange={e => patchLayoutContent({ watermarkBottom: Number(e.target.value) })}
+                  className="bg-stone-800 border-stone-600 text-white"
+                />
+              </div>
+            </div>
+            <p className="text-stone-600 text-xs">
+              고급: JSON으로 좌표를 덮어쓰려면 DB의 layout_json.textPanel을 설정하면 됩니다.
+            </p>
           </div>
         )}
 

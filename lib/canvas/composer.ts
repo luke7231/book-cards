@@ -1,14 +1,20 @@
-import type { Card, Project } from '@/lib/types'
+import type { Card, CardLayoutBorder, CardLayoutContent, CardLayoutTextPanel, Project } from '@/lib/types'
+import { parseCardLayout } from '@/lib/canvas/card-layout'
 
 const CARD_WIDTH = 1080
 const CARD_HEIGHT = 1350
-const PAD_X = 52     // 텍스트 박스 좌우 내부 여백
-const PAD_TOP = 44   // 텍스트 박스 상단 내부 여백
-const PAD_BOT = 48   // 텍스트 박스 하단 내부 여백
-const TITLE_BODY_GAP = 22  // 제목-본문 사이 간격
+const PAD_X = 52 // 텍스트 박스 좌우 내부 여백
+const PAD_TOP = 44 // 텍스트 박스 상단 내부 여백
+const PAD_BOT = 48 // 텍스트 박스 하단 내부 여백
+const TITLE_BODY_GAP = 22 // 제목-본문 사이 간격
+
+const DEFAULT_PANEL_OUTSET_X = 44
+const DEFAULT_PANEL_OUTSET_Y = 40
+const DEFAULT_PANEL_BORDER: CardLayoutBorder = { width: 2, color: '#111111' }
+const DEFAULT_WATERMARK_BOTTOM = 24
 
 const TITLE_FONT = `bold 58px Pretendard, "Noto Sans KR", sans-serif`
-const BODY_FONT = `400 28px "Nanum Myeongjo", "Noto Serif KR", serif`
+const BODY_FONT = `400 28px Pretendard, "Noto Sans KR", sans-serif`
 const TITLE_LINE_H = 70
 const BODY_LINE_H = 42
 
@@ -19,9 +25,36 @@ interface ComposerConfig {
   isEnding?: boolean
 }
 
-// 짝수 카드 → 상단 (커버 0 제외), 홀수 → 하단
+/** 짝수 카드 → 상단 (커버 0 제외), 홀수 → 하단 */
 function isBoxOnTop(cardNumber: number): boolean {
   return cardNumber % 2 === 0 && cardNumber !== 0
+}
+
+function mergeContentBorder(c?: CardLayoutContent): CardLayoutBorder | null {
+  if (c?.border === null) return null
+  if (c?.border && c.border.width > 0) return c.border
+  if (c?.border && c.border.width <= 0) return null
+  return DEFAULT_PANEL_BORDER
+}
+
+function resolveTextPanelBorder(
+  c: CardLayoutContent | undefined,
+  tp: CardLayoutTextPanel
+): CardLayoutBorder | null {
+  if (tp.border !== undefined) {
+    if (tp.border === null) return null
+    if (tp.border.width > 0) return tp.border
+    return null
+  }
+  return mergeContentBorder(c)
+}
+
+function isFullTextPanel(tp: CardLayoutTextPanel | undefined): tp is CardLayoutTextPanel {
+  if (!tp) return false
+  const { x, y, width, height } = tp
+  return [x, y, width, height].every(
+    n => typeof n === 'number' && Number.isFinite(n) && n >= 0 && width > 0 && height > 0
+  )
 }
 
 // 텍스트를 실제로 그리지 않고 높이만 측정
@@ -132,41 +165,79 @@ export async function composeCard(config: ComposerConfig): Promise<Blob> {
 // ─── 본문 카드: 텍스트 높이 측정 → 박스 동적 결정 ─────────────
 function drawContentLayout(ctx: CanvasRenderingContext2D, card: Card, project: Project) {
   const onTop = isBoxOnTop(card.card_number)
-  const textMaxW = CARD_WIDTH - PAD_X * 2
+  const layout = parseCardLayout(card.layout_json ?? null)
+  const c = layout?.content
 
   const titleText = `${card.card_number}. ${card.title}`
 
-  // 1단계: 폰트 세팅 후 높이 측정
-  ctx.font = TITLE_FONT
-  const titleH = measureWrappedText(ctx, titleText, textMaxW, TITLE_LINE_H)
+  let panelX: number
+  let panelY: number
+  let panelW: number
+  let panelH: number
+  let textMaxW: number
+  let panelBorder: CardLayoutBorder | null
+  const tp = c?.textPanel
 
-  ctx.font = BODY_FONT
-  const bodyH = measureWrappedText(ctx, card.body, textMaxW, BODY_LINE_H)
+  if (isFullTextPanel(tp)) {
+    panelX = tp!.x
+    panelW = tp!.width
+    textMaxW = Math.max(8, panelW - PAD_X * 2)
+    ctx.font = TITLE_FONT
+    const titleH = measureWrappedText(ctx, titleText, textMaxW, TITLE_LINE_H)
+    ctx.font = BODY_FONT
+    const bodyH = measureWrappedText(ctx, card.body, textMaxW, BODY_LINE_H)
+    const contentH = PAD_TOP + titleH + TITLE_BODY_GAP + bodyH + PAD_BOT
+    panelH = Math.max(tp!.height, contentH)
+    panelY = tp!.y
+    panelBorder = resolveTextPanelBorder(c, tp!)
+  } else {
+    const outsetX = c?.panelOutsetX ?? DEFAULT_PANEL_OUTSET_X
+    const outsetY = c?.panelOutsetY ?? DEFAULT_PANEL_OUTSET_Y
+    panelX = outsetX
+    panelW = CARD_WIDTH - 2 * outsetX
+    textMaxW = Math.max(8, panelW - PAD_X * 2)
+    ctx.font = TITLE_FONT
+    const titleH = measureWrappedText(ctx, titleText, textMaxW, TITLE_LINE_H)
+    ctx.font = BODY_FONT
+    const bodyH = measureWrappedText(ctx, card.body, textMaxW, BODY_LINE_H)
+    panelH = PAD_TOP + titleH + TITLE_BODY_GAP + bodyH + PAD_BOT
+    panelY = onTop ? outsetY : CARD_HEIGHT - panelH - outsetY
+    panelBorder = mergeContentBorder(c)
+  }
 
-  // 동적 박스 높이 = 상단 패딩 + 제목 + 간격 + 본문 + 하단 패딩
-  const boxH = PAD_TOP + titleH + TITLE_BODY_GAP + bodyH + PAD_BOT
-  const boxY = onTop ? 0 : CARD_HEIGHT - boxH
+  const bg =
+    isFullTextPanel(tp) && tp!.background !== undefined ? tp!.background! : '#ffffff'
+  ctx.fillStyle = bg
+  ctx.fillRect(panelX, panelY, panelW, panelH)
 
-  // 2단계: 박스 그리기
-  ctx.fillStyle = '#ffffff'
-  ctx.fillRect(0, boxY, CARD_WIDTH, boxH)
+  if (panelBorder) {
+    ctx.strokeStyle = panelBorder.color
+    ctx.lineWidth = panelBorder.width
+    ctx.strokeRect(
+      panelX + panelBorder.width / 2,
+      panelY + panelBorder.width / 2,
+      panelW - panelBorder.width,
+      panelH - panelBorder.width
+    )
+  }
 
-  // 3단계: 제목 그리기
+  const textLeft = panelX + PAD_X
+  const textTop = panelY + PAD_TOP
+
   ctx.font = TITLE_FONT
   ctx.fillStyle = '#111111'
   ctx.textAlign = 'left'
   ctx.textBaseline = 'top'
-  const titleEndY = drawWrappedText(ctx, titleText, PAD_X, boxY + PAD_TOP, textMaxW, TITLE_LINE_H)
+  const titleEndY = drawWrappedText(ctx, titleText, textLeft, textTop, textMaxW, TITLE_LINE_H)
 
-  // 4단계: 본문 그리기 (구분선 없음)
   ctx.font = BODY_FONT
   ctx.fillStyle = '#444444'
   ctx.textAlign = 'left'
   ctx.textBaseline = 'top'
-  drawWrappedText(ctx, card.body, PAD_X, titleEndY + TITLE_BODY_GAP, textMaxW, BODY_LINE_H)
+  drawWrappedText(ctx, card.body, textLeft, titleEndY + TITLE_BODY_GAP, textMaxW, BODY_LINE_H)
 
-  // 워터마크: 카드 최하단 중앙 고정 (항상 이미지 영역 위)
-  drawWatermark(ctx, project, onTop)
+  const wmBottom = c?.watermarkBottom ?? DEFAULT_WATERMARK_BOTTOM
+  drawWatermark(ctx, project, onTop, wmBottom, panelY, panelH)
 }
 
 // ─── 커버 카드 ────────────────────────────────────────────────
@@ -250,18 +321,39 @@ function drawEndingLayout(ctx: CanvasRenderingContext2D, card: Card, project: Pr
   ctx.fillText('저장하고 나중에 다시 읽어봐 →', centerX, boxY - 24)
 }
 
-// ─── 워터마크: 항상 카드 최하단 ───────────────────────────────
-function drawWatermark(ctx: CanvasRenderingContext2D, project: Project, boxOnTop: boolean) {
+/** 워터마크: 이미지 영역 안쪽 (본문 카드). 하단 박스와 겹치면 위로 올림 */
+function drawWatermark(
+  ctx: CanvasRenderingContext2D,
+  project: Project,
+  boxOnTop: boolean,
+  bottomFromEdge: number,
+  panelY: number,
+  panelH: number
+) {
   if (!project.brand_name) return
-  // 박스가 상단이면 워터마크는 이미지 영역(하단)에, 박스가 하단이면 워터마크도 최하단 박스 바깥
-  // 어느 경우든 이미지 영역 위에 표시
+
   ctx.font = '400 22px Pretendard, sans-serif'
-  ctx.fillStyle = boxOnTop
-    ? 'rgba(255,255,255,0.65)'   // 박스 상단 → 하단은 이미지
-    : 'rgba(255,255,255,0.65)'   // 박스 하단 → 워터마크는 박스 바로 위 이미지 영역
+  ctx.fillStyle = 'rgba(255,255,255,0.65)'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'bottom'
-  ctx.fillText(`@${project.brand_name}`, CARD_WIDTH / 2, CARD_HEIGHT - 24)
+
+  const textRoughH = 28
+  let y = CARD_HEIGHT - bottomFromEdge
+
+  if (!boxOnTop) {
+    const panelTop = panelY
+    const gap = 8
+    const maxY = panelTop - gap
+    if (y > maxY) y = maxY
+  } else {
+    const panelBottom = panelY + panelH
+    const gap = 8
+    const minY = panelBottom + gap + textRoughH
+    if (y < minY) y = minY
+    if (y > CARD_HEIGHT - 8) y = CARD_HEIGHT - 8
+  }
+
+  ctx.fillText(`@${project.brand_name}`, CARD_WIDTH / 2, y)
 }
 
 export async function composeAllCards(
